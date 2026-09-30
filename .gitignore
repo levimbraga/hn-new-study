@@ -1,0 +1,21 @@
+# Wrangler local state and secrets
+.wrangler/
+.dev.vars*
+.env*
+
+# Dependencies
+node_modules/
+
+# Local data (downloaded captures, analysis scratch)
+data/
+*.gz
+*.sqlite
+*.sqlite3
+*.db
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
