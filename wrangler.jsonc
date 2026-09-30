@@ -1,0 +1,45 @@
+// Cloudflare Worker configuration for hn-new-study.
+// Resource names and the D1 database id are identifiers, not secrets.
+{
+  "name": "hn-new-study",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-22",
+
+  // The Worker runs only on schedule. No workers.dev URL and no routes, so it
+  // cannot be reached over HTTP.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  "triggers": {
+    "crons": [
+      // Snapshots of /newest, /shownew and the Firebase story lists.
+      // Must match SNAPSHOT_CRON in src/index.js.
+      "*/10 * * * *",
+      // Daily record: yesterday's stories, outcomes for three days ago, robots.txt.
+      "20 3 * * *"
+    ]
+  },
+
+  // Raw responses, gzipped, exactly as received. Private bucket.
+  "r2_buckets": [
+    { "binding": "RAW", "bucket_name": "hn-new-study-raw" }
+  ],
+
+  // Capture index and daily story tables. Schema in migrations/.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hn-new-study",
+      "database_id": "af42b53c-8f58-4cd2-9199-c5823a365536",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Failure alerts only. The binding can send to this one address and nothing else.
+  "send_email": [
+    { "name": "ALERT", "destination_address": "alerts@ormaos.com" }
+  ],
+
+  // Keeps console output from each run in the Cloudflare dashboard, for debugging.
+  "observability": { "enabled": true }
+}
