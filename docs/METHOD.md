@@ -183,3 +183,115 @@ does not depend on this choice, since the UTC table is always reported.
 ## Deviations
 
 None yet.
+
+## Amendment 1, 2026-09-30: no HTML snapshots
+
+This is the first deviation from the plan above. The "None yet" above was true
+when the plan was committed (commit `9b9b65b`), and the plan above is left as it
+was written. Where this amendment conflicts with it, this amendment applies.
+
+### What happened
+
+The collector was deployed on 2026-09-30 at about 16:15 UTC. From the deployed
+Cloudflare Worker, every request to `news.ycombinator.com` was refused:
+
+- 18 attempts between 16:20:28 and 16:52:00 UTC (`/newest`, `/shownew`, and
+  `/robots.txt`, first attempts and retries), all answered with **HTTP 419**.
+- Every body was the same 6 bytes, `Sorry\n` (SHA-256 `21676075593979e03a80a302b8c0abfc39a1fe1302f1e9b24c87ca8ccc12c5fb`).
+- Response headers: `content-type: text/plain; charset=utf-8`,
+  `content-length: 6`, `etag: "6aa07eca-6"`, `server: cloudflare`, and a
+  `cf-ray` ending in `-BOM` (the request left Cloudflare from Mumbai). The etag has
+  nginx's format (file modification time and size in hex). It decodes to a
+  6-byte file last modified on 2026-09-08, so this looks like a static refusal
+  page served by HN's own server.
+- The first request of the day was already refused. The collector sent at most
+  two requests per minute to that host, below the `Crawl-delay: 30` in
+  robots.txt. So the refusal is not a response to our rate.
+- The same request, with the same User-Agent, from the maintainer's home connection
+  (Brazil, residential IPv6) at 16:57:53 UTC returned HTTP 200 and the full page,
+  with `server: nginx` and no Cloudflare headers.
+
+This is consistent with HN refusing requests that come from Cloudflare Workers.
+The data can't tell whether it keys on Cloudflare's egress IP addresses or on the
+`CF-Worker` header that Cloudflare adds to Worker requests. Finding out would take
+more requests to a site that had just refused us, so we didn't make them. The
+raw 419 responses and their `captures` rows are kept as evidence. The
+collector does not try to work around the refusal.
+
+HN's `robots.txt` as fetched from the maintainer's machine on 2026-09-30 allowed
+`/newest` and `/shownew` and set `Crawl-delay: 30`. Its disallowed paths
+were `/collapse?`, `/context?`, `/fave?`, `/flag?`, `/hide?`, `/login`, `/logout`,
+`/r?`, `/reply?`, `/submitlink?`, `/vote?` and `/x?`. The daily capture of robots.txt was
+refused like everything else and has been removed, so this is the only record of the
+policy the study holds.
+
+### What changed
+
+From 2026-09-30 about 17:07 UTC, the snapshots every 10 minutes are:
+
+| source | request | role |
+|---|---|---|
+| `newstories_json` | `hacker-news.firebaseio.com/v0/newstories.json` | the list behind `/newest`, newest first, up to 500 ids |
+| `showstories_json` | `hacker-news.firebaseio.com/v0/showstories.json` | the list behind `/show` (ranked), kept for comparison only |
+| `algolia_shownew` | `hn.algolia.com/api/v1/search_by_date?tags=story,show_hn&hitsPerPage=50` | the 50 most recent Show HN stories, to reconstruct `/shownew` |
+
+`newest_html`, `shownew_html` and `robots_txt` are no longer requested. The daily
+Algolia record is unchanged.
+
+### Evidence that the API lists stand in for the pages
+
+Before deploying, one local test run fetched all four original sources within
+33 seconds (2026-09-30, 16:05:37 to 16:06:10 UTC, from the maintainer's
+machine). In that one aligned sample:
+
+- The 30 ids on `/newest` were exactly `newstories.json[1:31]`. The one-item
+  offset is a story (id 49910726) submitted in the 32 seconds between the two
+  requests.
+- All 30 ids on `/shownew` were in `newstories.json`, in the same order, at positions
+  2 to 251 (of 500), and in descending id order.
+- `showstories.json` is not `/shownew`: only 2 of its first 30 ids were on `/shownew`.
+
+That is one sample, not a proof. The analysis reports this comparison as
+the only direct check of the page-to-API correspondence, and treats the correspondence as an assumption.
+
+### Revised definitions
+
+- **First page of `/newest`** at a snapshot: the first 30 ids of that
+  snapshot's `newstories.json`.
+- **First page of `/shownew`** at a snapshot: the first 30 ids of that snapshot's
+  `newstories.json` whose story has `is_show = 1` in the `stories` table
+  (reconstruction A). If fewer than 30 such ids are among the 500, the snapshot
+  is marked incomplete for `/shownew`.
+- **Cross-check for `/shownew`** (reconstruction B): the first 30 hits of
+  that snapshot's `algolia_shownew` response whose ids are also present in
+  the same snapshot's `newstories.json`. The filter drops stories that Algolia
+  still lists but that are no longer live. A and B are compared at every snapshot,
+  and the share of snapshots where they agree exactly is reported. Where A is
+  incomplete, B is used and the count of such snapshots is reported. The Algolia list can
+  lag new submissions by a short indexing delay. Disagreements caused by the
+  newest story alone are counted separately.
+
+### Effect on the validation
+
+- The model is unchanged. It is still computed from the daily Algolia record, and
+  is still the primary estimate under the same decision rule.
+- The observed dwell ("last seen" and "first gone") is now measured on the
+  API lists defined above instead of on the HTML pages. The 10-minute interval,
+  the midpoint, the 60-minute rule for missing snapshots, and the definition of
+  "vanished early" all stay the same, applied to those lists.
+- The validation is now less independent than planned. The model and the
+  `/shownew` reconstruction both depend on Algolia's `show_hn` tag. The
+  `/newest` observation comes from HN's own API rather than from what a visitor
+  sees. What it still tests is whether "30 later submissions" predicts when a
+  story leaves the live list, including removals the model can't see.
+  What it no longer tests is whether the rendered pages behave like the API
+  lists. The single aligned sample above is the only evidence on that point.
+- The "Logged-out view" limitation becomes an "API view" limitation. The
+  "Offset between pages" limitation no longer applies: the three snapshot requests
+  are sent within a few seconds of each other, and each capture keeps its own
+  start time.
+- The "Ranking changes by HN" check (ids in descending order on each first page)
+  is applied to `newstories.json`. For `/shownew` it holds by construction, so
+  it can't detect a change there.
+- The study period and inclusion rule are unchanged. The HTML captures
+  from 2026-09-30 (all refused) contribute nothing to the analysis.
