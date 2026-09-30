@@ -221,9 +221,10 @@ collector does not try to work around the refusal.
 HN's `robots.txt` as fetched from the maintainer's machine on 2026-09-30 allowed
 `/newest` and `/shownew` and set `Crawl-delay: 30`. Its disallowed paths
 were `/collapse?`, `/context?`, `/fave?`, `/flag?`, `/hide?`, `/login`, `/logout`,
-`/r?`, `/reply?`, `/submitlink?`, `/vote?` and `/x?`. The daily capture of robots.txt was
-refused like everything else and has been removed, so this is the only record of the
-policy the study holds.
+`/r?`, `/reply?`, `/submitlink?`, `/vote?` and `/x?`. The Worker's daily capture of
+robots.txt was refused like everything else, so that capture was removed from the
+Worker on 2026-09-30. Its two refused responses are kept with the other 419s. From
+then on, robots.txt is saved by hand (see the addendum below).
 
 ### What changed
 
