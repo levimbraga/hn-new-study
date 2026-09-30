@@ -21,17 +21,18 @@ const SNAPSHOT_CRON = "*/10 * * * *";
 
 // news.ycombinator.com answers every request from Cloudflare Workers with HTTP 419
 // "Sorry" (see the amendment in docs/METHOD.md), so the Worker does not request
-// that host at all. The official API is the snapshot source.
+// that host at all. The snapshots come from APIs instead:
+//   - newstories.json is the list behind /newest (newest first, up to 500 ids);
+//   - showstories.json is the list behind /show (ranked), kept for comparison;
+//   - the 50 most recent Show HN stories from Algolia, to reconstruct /shownew
+//     independently of the 500-id limit of newstories.json.
 const SNAPSHOT_SOURCES = [
   { source: "newstories_json", url: "https://hacker-news.firebaseio.com/v0/newstories.json", ext: "json" },
   { source: "showstories_json", url: "https://hacker-news.firebaseio.com/v0/showstories.json", ext: "json" },
+  { source: "algolia_shownew", url: "https://hn.algolia.com/api/v1/search_by_date?tags=story%2Cshow_hn&hitsPerPage=50", ext: "json" },
 ];
 
-// HN's robots.txt sets `Crawl-delay: 30`. We keep at least this gap between the end of
-// one request to a host and the start of the next, retries included. Hosts not listed
-// here have no crawl delay; their retries wait DEFAULT_RETRY_DELAY_MS.
-const HOST_MIN_GAP_MS = { "news.ycombinator.com": 30_000 };
-const DEFAULT_RETRY_DELAY_MS = 20_000;
+const RETRY_DELAY_MS = 20_000;
 const FETCH_TIMEOUT_MS = 30_000;
 
 // Algolia returns at most 1000 hits per query regardless of paging, and a UTC day
@@ -97,10 +98,9 @@ async function runJob(env, controller, job) {
 
 async function snapshotJob(env, controller) {
   const scheduledAt = sec(controller.scheduledTime);
-  const gate = new HostGate();
   const results = {};
   for (const s of SNAPSHOT_SOURCES) {
-    const res = await capture(env, gate, {
+    const res = await capture(env, {
       source: s.source,
       url: s.url,
       scheduledAt,
@@ -127,13 +127,12 @@ async function snapshotJob(env, controller) {
 async function dailyJob(env, controller) {
   const scheduledAt = sec(controller.scheduledTime);
   const today = Math.floor(scheduledAt / 86400) * 86400;
-  const gate = new HostGate();
   const summary = { ok: true };
 
   // Yesterday's stories, first sighting.
   try {
     const day = today - 86400;
-    const r = await fetchAlgoliaDay(env, gate, "algolia_day", day, scheduledAt);
+    const r = await fetchAlgoliaDay(env, "algolia_day", day, scheduledAt);
     await upsertStories(env, r.hits);
     summary.stories = { day: isoDate(day), ...r.report, stored: r.hits.length, show: r.hits.filter(isShow).length };
     if (!r.complete) summary.ok = false;
@@ -145,7 +144,7 @@ async function dailyJob(env, controller) {
   // Stories from three days ago, re-measured.
   try {
     const day = today - 3 * 86400;
-    const r = await fetchAlgoliaDay(env, gate, "algolia_outcome", day, scheduledAt);
+    const r = await fetchAlgoliaDay(env, "algolia_outcome", day, scheduledAt);
     await insertOutcomes(env, r.hits);
     summary.outcomes = { day: isoDate(day), ...r.report, stored: r.hits.length };
     if (!r.complete) summary.ok = false;
@@ -161,9 +160,9 @@ async function dailyJob(env, controller) {
 // Tries the whole day first; if Algolia reports more hits than one query can
 // return, fetches each hour separately instead. Every page is captured raw,
 // including the whole-day page that turned out to be insufficient.
-async function fetchAlgoliaDay(env, gate, source, dayStart, scheduledAt) {
+async function fetchAlgoliaDay(env, source, dayStart, scheduledAt) {
   const dayEnd = dayStart + 86400;
-  const whole = await fetchAlgoliaWindow(env, gate, source, "day", dayStart, dayEnd, scheduledAt);
+  const whole = await fetchAlgoliaWindow(env, source, "day", dayStart, dayEnd, scheduledAt);
   if (whole.failed || whole.hits.length >= whole.nbHits) {
     return {
       hits: whole.hits,
@@ -178,7 +177,7 @@ async function fetchAlgoliaDay(env, gate, source, dayStart, scheduledAt) {
   let pages = whole.pages;
   for (let h = 0; h < 24; h++) {
     const name = `h${String(h).padStart(2, "0")}`;
-    const w = await fetchAlgoliaWindow(env, gate, source, name, dayStart + h * 3600, dayStart + (h + 1) * 3600, scheduledAt);
+    const w = await fetchAlgoliaWindow(env, source, name, dayStart + h * 3600, dayStart + (h + 1) * 3600, scheduledAt);
     hits.push(...w.hits);
     pages += w.pages;
     if (w.failed || w.hits.length < w.nbHits) {
@@ -195,7 +194,7 @@ async function fetchAlgoliaDay(env, gate, source, dayStart, scheduledAt) {
 
 // Pages through one time window until Algolia says there are no more pages.
 // Each hit is tagged with the fetch time of the page it came from.
-async function fetchAlgoliaWindow(env, gate, source, windowName, start, end, scheduledAt) {
+async function fetchAlgoliaWindow(env, source, windowName, start, end, scheduledAt) {
   const filters = encodeURIComponent(`created_at_i>=${start},created_at_i<${end}`);
   const hits = [];
   let nbHits = 0;
@@ -203,7 +202,7 @@ async function fetchAlgoliaWindow(env, gate, source, windowName, start, end, sch
   let nbPages = 1;
   while (page < nbPages) {
     const n = page;
-    const res = await capture(env, gate, {
+    const res = await capture(env, {
       source,
       url: `https://hn.algolia.com/api/v1/search_by_date?tags=story&numericFilters=${filters}&hitsPerPage=${ALGOLIA_HITS_PER_PAGE}&page=${n}`,
       scheduledAt,
@@ -251,20 +250,16 @@ function isShow({ hit }) {
 
 // Fetches `url` with at most one retry. Every attempt gets its own `captures`
 // row. Returns the raw body of the successful attempt, if any.
-async function capture(env, gate, spec) {
-  const host = new URL(spec.url).host;
-  let res = await captureAttempt(env, gate, spec, 1);
+async function capture(env, spec) {
+  let res = await captureAttempt(env, spec, 1);
   if (!res.ok) {
-    // For hosts with a crawl delay the gate enforces the wait before the retry.
-    if (!(host in HOST_MIN_GAP_MS)) await sleep(DEFAULT_RETRY_DELAY_MS);
-    res = await captureAttempt(env, gate, spec, 2);
+    await sleep(RETRY_DELAY_MS);
+    res = await captureAttempt(env, spec, 2);
   }
   return res;
 }
 
-async function captureAttempt(env, gate, spec, attempt) {
-  const host = new URL(spec.url).host;
-  await gate.wait(host);
+async function captureAttempt(env, spec, attempt) {
   const startedMs = Date.now();
   const row = {
     source: spec.source, url: spec.url, scheduled_at: spec.scheduledAt, started_at: sec(startedMs),
@@ -288,9 +283,8 @@ async function captureAttempt(env, gate, spec, attempt) {
     row.finished_at = nowSec();
     row.error = `fetch failed: ${err?.name}: ${err?.message}`;
   }
-  gate.done(host);
 
-  // Non-2xx bodies are stored too: an error page from HN is evidence worth keeping.
+  // Non-2xx bodies are stored too: an error page is evidence worth keeping.
   if (body !== null) {
     try {
       const gz = await gzip(body);
@@ -335,22 +329,6 @@ async function captureAttempt(env, gate, spec, attempt) {
 async function freeKey(env, key, startedMs) {
   if ((await env.RAW.head(key)) === null) return key;
   return key.replace(/(\.[a-z]+\.gz)$/, `-${stamp(startedMs)}$1`);
-}
-
-// Keeps a minimum gap between consecutive requests to the same host within
-// one invocation, measured from the end of the previous request.
-class HostGate {
-  constructor() {
-    this.lastDone = new Map();
-  }
-  async wait(host) {
-    const gap = HOST_MIN_GAP_MS[host] ?? 0;
-    const last = this.lastDone.get(host);
-    if (gap && last !== undefined) await sleep(last + gap - Date.now());
-  }
-  done(host) {
-    this.lastDone.set(host, Date.now());
-  }
 }
 
 // ---------------------------------------------------------------------------
