@@ -6,9 +6,9 @@ How long does a new Hacker News submission stay on the first page of
 week it is submitted?
 
 This repository is the data collector for that question. It is a small
-Cloudflare Worker that takes snapshots of those pages every 10 minutes and keeps
-a daily record of all submitted stories, from 2026-09-30 until the end of
-November 2026. The analysis will be written later, by hand, following the plan in
+Cloudflare Worker that snapshots the lists behind those pages every 10 minutes,
+through Hacker News's official API and the Algolia HN Search API, and keeps a daily
+record of all submitted stories, from 2026-09-30 until the end of November 2026. The analysis will be written later, by hand, following the plan in
 [docs/METHOD.md](docs/METHOD.md), which was written and committed before any data
 was looked at.
 
@@ -36,23 +36,27 @@ is parsed at collection time.
 
 ### Every 10 minutes (cron `*/10 * * * *`)
 
-Four requests, in this order:
+Three requests, in this order, within a few seconds:
 
-| source | URL |
-|---|---|
-| `newest_html` | `https://news.ycombinator.com/newest` |
-| `shownew_html` | `https://news.ycombinator.com/shownew` |
-| `newstories_json` | `https://hacker-news.firebaseio.com/v0/newstories.json` |
-| `showstories_json` | `https://hacker-news.firebaseio.com/v0/showstories.json` |
+| source | URL | role |
+|---|---|---|
+| `newstories_json` | `https://hacker-news.firebaseio.com/v0/newstories.json` | the list behind /newest, newest first (500 ids); its first 30 ids are the first page |
+| `showstories_json` | `https://hacker-news.firebaseio.com/v0/showstories.json` | the list behind /show (ranked), kept for comparison |
+| `algolia_shownew` | `https://hn.algolia.com/api/v1/search_by_date?tags=story%2Cshow_hn&hitsPerPage=50` | the 50 most recent Show HN stories, to reconstruct the first page of /shownew |
 
-The two HTML pages are the measurement itself: the first 30 items as a visitor
-sees them. The Firebase lists are captured alongside to cross-check the HTML
-(`showstories_json` in particular, to verify which page it mirrors).
+The first page of /shownew is reconstructed from these, as defined in
+[docs/METHOD.md](docs/METHOD.md) (Amendment 1).
 
-HN's `robots.txt` asks for `Crawl-delay: 30`. The collector waits at least 30
-seconds after one request to `news.ycombinator.com` finishes before sending the
-next, so `/shownew` is fetched about 30 seconds after `/newest`. Each capture
-records its own start time, so this offset is visible in the data.
+#### Why not the pages themselves
+
+The collector was built to fetch the HTML of /newest and /shownew. Once deployed,
+every request from the Worker to `news.ycombinator.com` was answered with HTTP 419
+and a 6-byte body, `Sorry`, while the same request from a home connection
+succeeded. HN appears to refuse traffic from Cloudflare Workers. The collector
+does not try to get around that; since 2026-09-30 about 17:00 UTC it sends no
+requests to `news.ycombinator.com` at all. The refused responses are kept in
+the data, and the evidence and the effect on the method are in
+[docs/METHOD.md](docs/METHOD.md), Amendment 1.
 
 ### Once a day (cron `20 3 * * *`, UTC)
 
@@ -67,27 +71,21 @@ records its own start time, so this offset is visible in the data.
 2. **Outcomes.** Stories created on the full UTC day three days earlier are
    fetched again the same way, and their points and comments at that moment go
    into `story_outcomes`.
-3. **Policy on record.** HN's `robots.txt` is captured, 5 minutes after the cron
-   time. This keeps it clear of the 03:20 snapshot run's requests to the same host,
-   so any policy change during the study is documented.
 
 ## Request volume
 
 All requests send
 `User-Agent: hn-new-study/0.1 (+https://github.com/levimbraga/hn-new-study)`.
-A request that fails (network error or non-2xx status) is retried once: after 30
-seconds for `news.ycombinator.com` (its crawl delay), after 20 seconds for the
-other hosts. The failure is then recorded, and the collector moves on.
+A request that fails (network error or non-2xx status) is retried once, after 20
+seconds. The failure is then recorded, and the collector moves on.
 
 | host | per hour | per day | what |
 |---|---|---|---|
-| `news.ycombinator.com` | 12 | 289 | /newest and /shownew every 10 minutes, robots.txt once a day |
 | `hacker-news.firebaseio.com` | 12 | 288 | two JSON lists every 10 minutes |
-| `hn.algolia.com` | 0 (all in one burst, once a day) | 2 to 50 | one whole-day query for each of the two days; for a day with more than 1000 stories (most weekdays), 24 hourly queries in addition |
+| `hn.algolia.com` | 6, plus the daily burst | 146 to 194 | the latest 50 Show HN stories every 10 minutes (144 a day); once a day, one whole-day query for each of two days, plus 24 hourly queries for a day with more than 1000 stories (most weekdays) |
+| `news.ycombinator.com` | 0 | 0 | none since 2026-09-30 about 17:00 UTC (see above) |
 
-With retries, the worst case is twice these numbers. Requests to
-`news.ycombinator.com` are never less than 30 seconds apart within a run, and
-runs are 10 minutes apart.
+With retries, the worst case is twice these numbers.
 
 ## Storage layout
 
@@ -96,11 +94,14 @@ runs are 10 minutes apart.
 Every object is gzip-compressed. Once decompressed, it is byte-for-byte the response body.
 
 ```
-raw/{source}/{YYYY}/{MM}/{DD}/{YYYYMMDD}T{HHMMSS}Z.{html|json}.gz   snapshots (UTC fetch start time)
-raw/algolia_day/{YYYY}/{MM}/{DD}/{window}-p{n}.json.gz               yesterday's stories (date = the day covered)
-raw/algolia_outcome/{YYYY}/{MM}/{DD}/{window}-p{n}.json.gz           re-fetch three days later (date = the day covered)
-raw/robots_txt/{YYYY}/{MM}/{DD}/{YYYYMMDD}T{HHMMSS}Z.txt.gz
+raw/{source}/{YYYY}/{MM}/{DD}/{YYYYMMDD}T{HHMMSS}Z.json.gz   snapshots (UTC fetch start time)
+raw/algolia_day/{YYYY}/{MM}/{DD}/{window}-p{n}.json.gz        yesterday's stories (date = the day covered)
+raw/algolia_outcome/{YYYY}/{MM}/{DD}/{window}-p{n}.json.gz    re-fetch three days later (date = the day covered)
 ```
+
+The bucket also holds the refused responses from 2026-09-30, 16:20 to 16:52 UTC,
+under `raw/newest_html/`, `raw/shownew_html/` and `raw/robots_txt/` (6-byte
+`Sorry` bodies, with `.html.gz` and `.txt.gz` extensions).
 
 `{window}` is `day` for the whole-day query, or `h00` to `h23` for hourly windows.
 Objects are never overwritten: if an Algolia key already exists (for example a
@@ -127,6 +128,12 @@ in UTC.
 - `runs`: one row per cron invocation, with a JSON summary. A row whose
   `finished_at` is empty means that invocation died.
 - `alerts`: every failure or recovery email the collector tried to send.
+
+The `source` values in use are `newstories_json`, `showstories_json`,
+`algolia_shownew`, `algolia_day` and `algolia_outcome`. The comment in the
+migration also lists `newest_html`, `shownew_html` and `robots_txt`, which were
+only captured (and refused) on 2026-09-30. `algolia_shownew` was added after the
+migration was applied.
 
 ## Checking health
 
@@ -185,8 +192,14 @@ curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=*%2F10+*+*+*+*"   # sna
 curl "http://localhost:8787/cdn-cgi/local/scheduled?cron=20+3+*+*+*"       # daily job
 ```
 
-The daily job waits until 5 minutes after its scheduled time before fetching
-robots.txt. Add `&time=<epoch milliseconds>` to set the scheduled time in the past.
+Add `&time=<epoch milliseconds>` to set the scheduled time explicitly; the daily
+job works on the days before that time.
+
+The deployed Worker has no HTTP endpoint, so there is no URL to trigger a run.
+To run the daily job once outside its schedule, deploy with one extra cron
+expression a few minutes ahead (any cron other than `*/10 * * * *` runs the
+daily job), then deploy again without it. The `runs` table records which
+cron fired.
 
 ## License
 
