@@ -295,3 +295,12 @@ the only direct check of the page-to-API correspondence, and treats the correspo
   it can't detect a change there.
 - The study period and inclusion rule are unchanged. The HTML captures
   from 2026-09-30 (all refused) contribute nothing to the analysis.
+
+### Addendum, 2026-09-30: robots.txt recorded by hand
+
+Because the Worker no longer contacts `news.ycombinator.com`, HN's crawl policy
+is no longer captured daily. Instead, the maintainer saves `robots.txt` from their
+own machine at the start and at the end of the study, and commits each copy to
+[docs/robots/](robots/) with its date, fetch time and SHA-256. The first copy was
+saved on 2026-09-30 at 17:14:39 UTC. It is identical to the policy quoted above.
+A policy change between those two dates would not be detected.
