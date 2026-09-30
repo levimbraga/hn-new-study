@@ -1,10 +1,10 @@
 // hn-new-study collector.
 //
 // Two scheduled jobs, no HTTP surface:
-//   - every 10 minutes, snapshot the first page of /newest and /shownew (plus
-//     the Firebase story lists) and store each response raw;
-//   - once a day, record yesterday's stories from Algolia, re-measure stories
-//     from three days ago, and archive HN's robots.txt.
+//   - every 10 minutes, snapshot the official API's story lists and store each
+//     response raw;
+//   - once a day, record yesterday's stories from Algolia and re-measure stories
+//     from three days ago.
 //
 // The rule throughout: store every response body exactly as received (gzipped
 // in R2), and keep D1 as an index of what was captured. Nothing is parsed here
@@ -19,11 +19,10 @@ const USER_AGENT = "hn-new-study/0.1 (+https://github.com/levimbraga/hn-new-stud
 // which lets a one-off cron expression trigger the daily job without an HTTP endpoint.
 const SNAPSHOT_CRON = "*/10 * * * *";
 
-// Fetch order is part of the method: /newest first, so it is the capture
-// closest to the cron's scheduled time.
+// news.ycombinator.com answers every request from Cloudflare Workers with HTTP 419
+// "Sorry" (see the amendment in docs/METHOD.md), so the Worker does not request
+// that host at all. The official API is the snapshot source.
 const SNAPSHOT_SOURCES = [
-  { source: "newest_html", url: "https://news.ycombinator.com/newest", ext: "html" },
-  { source: "shownew_html", url: "https://news.ycombinator.com/shownew", ext: "html" },
   { source: "newstories_json", url: "https://hacker-news.firebaseio.com/v0/newstories.json", ext: "json" },
   { source: "showstories_json", url: "https://hacker-news.firebaseio.com/v0/showstories.json", ext: "json" },
 ];
@@ -38,11 +37,6 @@ const FETCH_TIMEOUT_MS = 30_000;
 // Algolia returns at most 1000 hits per query regardless of paging, and a UTC day
 // has more stories than that, so a day is split into hours when needed.
 const ALGOLIA_HITS_PER_PAGE = 1000;
-
-// The daily cron (03:20) coincides with a snapshot run, which requests HN at about
-// +0 s and +30 s. robots.txt is fetched 5 minutes after the scheduled time, midway
-// between snapshot runs, so the two invocations never hit HN within the crawl delay.
-const ROBOTS_OFFSET_MS = 5 * 60_000;
 
 const FAILURES_BEFORE_ALERT = 3;
 const ALERT_MIN_INTERVAL_S = 6 * 3600;
@@ -131,8 +125,7 @@ async function snapshotJob(env, controller) {
 // Job 2: daily record.
 
 async function dailyJob(env, controller) {
-  const scheduledMs = controller.scheduledTime;
-  const scheduledAt = sec(scheduledMs);
+  const scheduledAt = sec(controller.scheduledTime);
   const today = Math.floor(scheduledAt / 86400) * 86400;
   const gate = new HostGate();
   const summary = { ok: true };
@@ -159,22 +152,6 @@ async function dailyJob(env, controller) {
   } catch (err) {
     summary.ok = false;
     summary.outcomes = { error: String(err?.stack || err) };
-  }
-
-  // HN's robots.txt, so any policy change during the study is on record.
-  try {
-    await sleep(scheduledMs + ROBOTS_OFFSET_MS - Date.now());
-    const res = await capture(env, gate, {
-      source: "robots_txt",
-      url: "https://news.ycombinator.com/robots.txt",
-      scheduledAt,
-      keyFor: (startedMs) => `raw/robots_txt/${datePath(startedMs)}/${stamp(startedMs)}.txt.gz`,
-    });
-    summary.robots_txt = res.ok ? "ok" : res.error;
-    if (!res.ok) summary.ok = false;
-  } catch (err) {
-    summary.ok = false;
-    summary.robots_txt = String(err?.stack || err);
   }
 
   return summary;
