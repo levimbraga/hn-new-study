@@ -12,10 +12,10 @@
 
   "triggers": {
     "crons": [
-      // Snapshots of /newest, /shownew and the Firebase story lists.
-      // Must match SNAPSHOT_CRON in src/index.js.
+      // Snapshots of the API lists: newstories.json, showstories.json and the
+      // latest Show HN stories from Algolia. Must match SNAPSHOT_CRON in src/index.js.
       "*/10 * * * *",
-      // Daily record: yesterday's stories, outcomes for three days ago, robots.txt.
+      // Daily record: yesterday's stories and outcomes for three days ago, from Algolia.
       "20 3 * * *"
     ]
   },
