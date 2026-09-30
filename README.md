@@ -58,6 +58,9 @@ requests to `news.ycombinator.com` at all. The refused responses are kept in
 the data, and the evidence and the effect on the method are in
 [docs/METHOD.md](docs/METHOD.md), Amendment 1.
 
+For the same reason, HN's `robots.txt` is not captured by the Worker. It is saved
+by hand at the start and at the end of the study, in [docs/robots/](docs/robots/).
+
 ### Once a day (cron `20 3 * * *`, UTC)
 
 1. **Yesterday's stories.** All stories created from yesterday 00:00:00 UTC to
