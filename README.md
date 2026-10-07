@@ -74,6 +74,8 @@ by hand at the start and at the end of the study, in [docs/robots/](docs/robots/
 2. **Outcomes.** Stories created on the full UTC day three days earlier are
    fetched again the same way, and their points and comments at that moment go
    into `story_outcomes`.
+3. **Dead-man check.** The previous UTC day is checked for problems that the
+   per-run alerts can't see (see [Checking health](#checking-health)).
 
 ## Request volume
 
@@ -166,6 +168,37 @@ A healthy day has 144 successful captures of each snapshot source. The
 collector emails an alert when a snapshot source fails three captures in a row,
 another when it recovers (at most one email per source per 6 hours), and one
 when the daily job fails.
+
+Since 2026-10-07, the daily job also runs a dead-man check of the previous UTC
+day, and emails (at most once per problem type per day) when:
+
+- a snapshot source has fewer than 140 of its 144 slots with a successful
+  capture (a slot counts once, even if Cloudflare re-ran it);
+- a run from that day has no `finished_at` and started more than 30 minutes ago;
+- no daily run from that day recorded `ok = 1`.
+
+Its results are in the `deadman` field of the daily run's `summary`. The check
+never changes the daily job's own `ok`.
+
+**If the cron stops entirely, nothing runs and nothing is sent.** Silence then
+looks the same as health, and the only sign is the dead-man check missing from
+`runs`. So once a week, glance at these three numbers for the last 7 days:
+
+```sh
+npx wrangler d1 execute hn-new-study --remote --command \
+  "SELECT
+     (SELECT group_concat(source || ' ' || n, ', ') FROM (SELECT source, COUNT(DISTINCT scheduled_at / 600) AS n
+        FROM captures WHERE error IS NULL AND scheduled_at >= unixepoch('now', '-7 days')
+        AND source IN ('newstories_json', 'showstories_json', 'algolia_shownew') GROUP BY source)) AS slots_ok,
+     (SELECT COUNT(*) FROM runs WHERE cron = '20 3 * * *' AND ok = 1
+        AND scheduled_at >= unixepoch('now', '-7 days')) AS daily_ok,
+     (SELECT COUNT(*) FROM runs WHERE scheduled_at >= unixepoch('now', '-7 days')
+        AND (finished_at IS NULL OR (cron = '*/10 * * * *' AND ok = 0))
+        AND started_at < unixepoch('now', '-30 minutes')) AS bad_runs"
+```
+
+A healthy week shows about 1008 slots for each source, `daily_ok` of 7 and
+`bad_runs` of 0.
 
 ## Running your own copy
 
