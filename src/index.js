@@ -43,7 +43,11 @@ const FAILURES_BEFORE_ALERT = 3;
 const ALERT_MIN_INTERVAL_S = 6 * 3600;
 // If sending an alert fails, try again no more than hourly rather than every run.
 const ALERT_RETRY_AFTER_FAILED_SEND_S = 3600;
-const ALERT_FROM = { email: "notify@ormaos.com", name: "hn-new-study" };
+// Dead-man check, run by the daily job on the previous UTC day.
+const SLOTS_PER_DAY = 144;
+const DEADMAN_MIN_CAPTURES = 140;
+const DEADMAN_UNFINISHED_AFTER_S = 30 * 60;
+const ALERT_FROM ={ email: "notify@ormaos.com", name: "hn-new-study" };
 const ALERT_TO = "alerts@ormaos.com";
 
 export default {
@@ -153,7 +157,85 @@ async function dailyJob(env, controller) {
     summary.outcomes = { error: String(err?.stack || err) };
   }
 
+  // Dead-man check of the previous day. It reports problems by email but never
+  // changes this job's own ok, so a failing check can't mask or cause a daily failure.
+  try {
+    summary.deadman = await deadmanCheck(env, today - 86400, today);
+  } catch (err) {
+    summary.deadman = { error: String(err?.stack || err) };
+  }
+
   return summary;
+}
+
+// Checks the UTC day [dayStart, dayEnd) for problems the per-run alerts can't see:
+// snapshot sources short of captures, runs that died without finishing, and a
+// daily job that did not succeed. Sends at most one email per problem type per
+// UTC day. Each check catches its own errors.
+async function deadmanCheck(env, dayStart, dayEnd) {
+  const report = {};
+  const checks = {
+    // Successful captures per source, counted once per 10-minute slot: a slot that
+    // Cloudflare re-ran after a run died has two captures and must not count twice.
+    captures: async () => {
+      const short = [];
+      for (const s of SNAPSHOT_SOURCES) {
+        const row = await env.DB.prepare(
+          `SELECT COUNT(DISTINCT scheduled_at / 600) AS n FROM captures
+           WHERE source = ? AND error IS NULL AND scheduled_at >= ? AND scheduled_at < ?`,
+        ).bind(s.source, dayStart, dayEnd).first();
+        report[s.source] = row.n;
+        if (row.n < DEADMAN_MIN_CAPTURES) short.push(`${s.source}: ${row.n} of ${SLOTS_PER_DAY}`);
+      }
+      return short.length ? short : null;
+    },
+    unfinished: async () => {
+      const { results } = await env.DB.prepare(
+        `SELECT id, cron, scheduled_at, started_at FROM runs
+         WHERE finished_at IS NULL AND scheduled_at >= ? AND scheduled_at < ? AND started_at < ?`,
+      ).bind(dayStart, dayEnd, nowSec() - DEADMAN_UNFINISHED_AFTER_S).all();
+      report.unfinished = results.length;
+      return results.length ? results.map((r) => `run ${r.id} (${r.cron}) scheduled ${fmt(r.scheduled_at)}`) : null;
+    },
+    daily: async () => {
+      const row = await env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM runs
+         WHERE cron != ? AND ok = 1 AND scheduled_at >= ? AND scheduled_at < ?`,
+      ).bind(SNAPSHOT_CRON, dayStart, dayEnd).first();
+      report.daily_ok = row.n;
+      return row.n === 0 ? ["no daily run recorded ok = 1"] : null;
+    },
+  };
+
+  for (const [type, check] of Object.entries(checks)) {
+    try {
+      const problems = await check();
+      if (problems === null) continue;
+      report[`${type}_problem`] = problems;
+      await alertDeadman(env, type, dayStart, problems);
+    } catch (err) {
+      report[`${type}_error`] = String(err?.message || err);
+    }
+  }
+  return { day: isoDate(dayStart), ...report };
+}
+
+async function alertDeadman(env, type, dayStart, problems) {
+  const source = `deadman_${type}`;
+  const today = Math.floor(nowSec() / 86400) * 86400;
+  const sentToday = await env.DB.prepare(
+    "SELECT 1 FROM alerts WHERE source = ? AND ok = 1 AND sent_at >= ? LIMIT 1",
+  ).bind(source, today).first();
+  if (sentToday) return;
+  const text = [
+    `Dead-man check of ${isoDate(dayStart)} (UTC) found a problem: ${type}.`,
+    "",
+    ...problems,
+    "",
+    `Thresholds: at least ${DEADMAN_MIN_CAPTURES} of ${SLOTS_PER_DAY} slots per snapshot source,`,
+    `no run unfinished after ${DEADMAN_UNFINISHED_AFTER_S / 60} minutes, one daily run with ok = 1.`,
+  ].join("\n");
+  await sendAlert(env, source, "failing", `[hn-new-study] dead-man check ${isoDate(dayStart)}: ${type}`, text, problems.join("; "));
 }
 
 // Fetches every story created in [dayStart, dayStart + 1 day) from Algolia.
