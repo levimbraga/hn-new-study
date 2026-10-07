@@ -305,3 +305,55 @@ own machine at the start and at the end of the study, and commits each copy to
 [docs/robots/](robots/) with its date, fetch time and SHA-256. The first copy was
 saved on 2026-09-30 at 17:14:39 UTC. It is identical to the policy quoted above.
 A policy change between those two dates would not be detected.
+
+## Observations during collection
+
+Facts about the collected data noticed while collection is running, and how the
+analysis handles them. The plan above is unchanged except where an entry says
+it is a deviation.
+
+### 2026-10-07: scheduled_at is offset from the slot
+
+`scheduled_at` (Cloudflare's `scheduledTime` for the cron run) is not on the
+10-minute boundary. It arrives with a fixed offset: 28 seconds for the ten runs
+from 2026-09-30 16:20 to 17:50 UTC, and 38 seconds for every run since 18:00
+UTC that day. The analysis therefore assigns each capture to its 10-minute slot,
+`scheduled_at / 600 * 600`, and groups by slot. It never matches `scheduled_at`
+by equality to a slot time.
+
+### 2026-10-07: a slot can be run twice
+
+Run 1018 (slot 2026-10-07 16:30 UTC) started at 16:31:36, captured
+`newstories_json` and `showstories_json`, and then died before `algolia_shownew`.
+Its `runs` row has no `finished_at`. Cloudflare ran the same slot again at
+16:38:16 (run 1019), which captured all three sources. Nothing was lost, but
+that slot has two successful captures of two sources. The analysis
+deduplicates captures per source per slot. Both captures are kept in the
+data. The analysis uses the first successful one, and reports how many slots
+had more than one.
+
+### 2026-10-07: dead and deleted stories missing from Algolia (deviation)
+
+Between 2026-10-01 and 2026-10-06, 5,964 distinct ids appeared in at least one
+`newstories_json` snapshot within the id range of that period's stories
+(49916067 to 49985932). Of these, 71 (1.2%) are not in the `stories` table. On
+2026-10-07 the official item API returned all 71 as type `story`: 50 dead, 20
+deleted, and 1 live. The live one, 49957602 (submitted 2026-10-04 20:42 UTC),
+was missing from the next day's Algolia fetch (746 hits) and present in the
+outcome fetch three days later (747 hits).
+
+This is the gap the "Algolia completeness" limitation anticipated. It matters
+because a dead or deleted story still sits on `/newest` until it is removed,
+pushing other stories down. This is a **deviation** from the model as defined
+above, which counts only stories in the `stories` table, and from "HN item
+states are not fetched individually":
+
+- `newstories.json` is the reference for which stories existed. The model counts
+  every id seen in any `newstories_json` snapshot, plus every story in the
+  `stories` table.
+- Items missing from the `stories` table are fetched from the official item
+  API (`/v0/item/{id}.json`) at analysis time, for their submission time and
+  their dead or deleted state. The number of such items, and any the API can't
+  return, are reported.
+- The model's dwell is reported both ways, counting all stories and counting
+  only Algolia's, so the effect of this change is visible.
